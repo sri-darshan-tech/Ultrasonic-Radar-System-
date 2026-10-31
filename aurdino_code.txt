@@ -1,0 +1,150 @@
+
+#include <Servo.h>
+
+Servo radarServo;
+
+const int trigPin = 9;
+const int echoPin = 10;
+const int servoPin = 6;
+const int greenLED = 3;
+const int redLED = 4;
+const int buzzer = 5;
+
+const int DETECT_DISTANCE = 20;
+const int CLEAR_DISTANCE = 25;
+const int MAX_DISTANCE = 200;
+
+int lockedAngle = 90;
+int lockedDistance = 200;
+bool obstacleLocked = false;
+
+// Read distance
+int getDistance() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH, 30000);
+
+  if (duration == 0) return 201;
+
+  int d = duration * 0.0343 / 2;
+  return constrain(d, 2, 201);
+}
+
+// Average three readings
+int stableDistance() {
+  int a = getDistance();
+  delay(25);
+  int b = getDistance();
+  delay(25);
+  int c = getDistance();
+
+  // Median reduces occasional incorrect readings
+  if (a > b) { int t = a; a = b; b = t; }
+  if (b > c) { int t = b; b = c; c = t; }
+  if (a > b) { int t = a; a = b; b = t; }
+
+  return c;
+}
+
+// Send stable data to the laptop
+void sendData(int angle, int distance) {
+  Serial.print(angle);
+  Serial.print(",");
+  Serial.println(distance);
+}
+
+// Hold position until the obstacle moves away
+void holdObstacle() {
+  radarServo.write(lockedAngle);
+
+  digitalWrite(redLED, HIGH);
+  digitalWrite(greenLED, LOW);
+  digitalWrite(buzzer, HIGH);
+
+  int clearCount = 0;
+
+  while (clearCount < 3) {
+    // Keep the same angle and distance on the laptop
+    sendData(lockedAngle, lockedDistance);
+
+    delay(150);
+
+    int d = stableDistance();
+
+    if (d > CLEAR_DISTANCE) {
+      clearCount++;
+    } else {
+      clearCount = 0;
+
+      // Do not let the display fluctuate while locked
+    }
+  }
+
+  obstacleLocked = false;
+
+  digitalWrite(redLED, LOW);
+  digitalWrite(greenLED, HIGH);
+  digitalWrite(buzzer, LOW);
+
+  delay(300);
+}
+
+void scanAtAngle(int angle) {
+  radarServo.write(angle);
+  delay(40);
+
+  int d = stableDistance();
+
+  if (d <= DETECT_DISTANCE) {
+    // Lock angle and distance at detection
+    lockedAngle = angle;
+    lockedDistance = d;
+    obstacleLocked = true;
+
+    sendData(lockedAngle, lockedDistance);
+    holdObstacle();
+  } else {
+    digitalWrite(redLED, LOW);
+    digitalWrite(greenLED, HIGH);
+    digitalWrite(buzzer, LOW);
+
+    sendData(angle, min(d, MAX_DISTANCE));
+  }
+}
+
+void setup() {
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  pinMode(greenLED, OUTPUT);
+  pinMode(redLED, OUTPUT);
+  pinMode(buzzer, OUTPUT);
+
+  radarServo.attach(servoPin);
+
+  Serial.begin(9600);
+
+  digitalWrite(trigPin, LOW);
+  digitalWrite(greenLED, HIGH);
+  digitalWrite(redLED, LOW);
+  digitalWrite(buzzer, LOW);
+
+  radarServo.write(90);
+  delay(500);
+}
+
+void loop() {
+  // Sweep left to right
+  for (int angle = 0; angle <= 180; angle++) {
+    scanAtAngle(angle);
+  }
+
+  // Sweep right to left
+  for (int angle = 180; angle >= 0; angle--) {
+    scanAtAngle(angle);
+  }
+}

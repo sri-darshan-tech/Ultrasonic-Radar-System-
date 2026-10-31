@@ -1,0 +1,349 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arduino Ultrasonic Radar</title>
+
+<style>
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: #020907;
+  color: #00ff88;
+  font-family: Arial, sans-serif;
+  text-align: center;
+}
+
+h1 {
+  letter-spacing: 3px;
+  margin: 20px 0 8px;
+}
+
+button {
+  padding: 12px 22px;
+  margin: 12px 5px;
+  background: #00bb66;
+  color: #00140b;
+  border: 0;
+  border-radius: 6px;
+  font-size: 16px;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+#status {
+  margin: 8px;
+  font-size: 16px;
+}
+
+.readings {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 30px;
+  padding: 12px;
+  font-size: 20px;
+}
+
+#warning {
+  font-weight: bold;
+  font-size: 22px;
+  min-height: 30px;
+}
+
+canvas {
+  display: block;
+  width: min(96vw, 900px);
+  height: auto;
+  margin: 10px auto;
+  background: #00150c;
+  border: 1px solid #007744;
+  border-radius: 8px;
+}
+</style>
+</head>
+
+<body>
+
+<h1>ULTRASONIC RADAR</h1>
+
+<button id="connect">CONNECT ARDUINO</button>
+<button id="disconnect">DISCONNECT</button>
+
+<div id="status">Not connected</div>
+
+<div class="readings">
+  <div>ANGLE: <span id="angle">--</span>°</div>
+  <div>DISTANCE: <span id="distance">--</span> cm</div>
+</div>
+
+<div id="warning">Waiting for sensor data...</div>
+
+<canvas id="radar" width="900" height="520"></canvas>
+
+<script>
+const canvas = document.getElementById("radar");
+const ctx = canvas.getContext("2d");
+
+const maxDistance = 200;
+const maxRadius = 430;
+
+let port = null;
+let reader = null;
+let keepReading = false;
+
+let currentAngle = 90;
+let currentDistance = 201;
+let locked = false;
+
+let objectHistory = [];
+let trail = [];
+
+const angleText = document.getElementById("angle");
+const distanceText = document.getElementById("distance");
+const statusText = document.getElementById("status");
+const warning = document.getElementById("warning");
+
+document.getElementById("connect").onclick = connectArduino;
+document.getElementById("disconnect").onclick = disconnectArduino;
+
+async function connectArduino() {
+  if (!("serial" in navigator)) {
+    statusText.textContent =
+      "Use a recent version of Chrome or Edge on your computer.";
+    return;
+  }
+
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 9600 });
+
+    keepReading = true;
+    statusText.textContent = "Connected — receiving radar data";
+    readSerial();
+  } catch (e) {
+    statusText.textContent = "Connection failed: " + e.message;
+  }
+}
+
+async function readSerial() {
+  const decoder = new TextDecoder();
+
+  let buffer = "";
+
+  try {
+    while (keepReading && port && port.readable) {
+      reader = port.readable.getReader();
+
+      try {
+        while (keepReading) {
+          const { value, done } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+
+          let lines = buffer.split(/\r?\n/);
+          buffer = lines.pop();
+
+          for (const line of lines) {
+            parseData(line.trim());
+          }
+        }
+      } finally {
+        reader.releaseLock();
+        reader = null;
+      }
+    }
+  } catch (e) {
+    if (keepReading) {
+      statusText.textContent = "Serial error: " + e.message;
+    }
+  }
+}
+
+function parseData(line) {
+  const values = line.split(",");
+  if (values.length !== 2) return;
+
+  const a = Number(values[0]);
+  const d = Number(values[1]);
+
+  if (!Number.isFinite(a) || !Number.isFinite(d)) return;
+  if (a < 0 || a > 180 || d < 0) return;
+
+  // If locked, keep the laptop readings frozen.
+  if (locked) {
+    // Resume only when three consecutive readings are clear.
+    if (d > 25) {
+      objectHistory.push(d);
+      if (objectHistory.length > 3) objectHistory.shift();
+    } else {
+      objectHistory = [];
+    }
+
+    if (objectHistory.length === 3) {
+      locked = false;
+      objectHistory = [];
+      trail = [];
+    } else {
+      return;
+    }
+  }
+
+  currentAngle = a;
+  currentDistance = d;
+
+  if (d <= 20) {
+    locked = true;
+    objectHistory = [];
+    trail = [{ angle: a, distance: d }];
+  } else if (d <= maxDistance) {
+    trail.push({ angle: a, distance: d });
+    if (trail.length > 100) trail.shift();
+  }
+
+  updateReadings();
+}
+
+function updateReadings() {
+  angleText.textContent = currentAngle.toFixed(0);
+  distanceText.textContent =
+    currentDistance <= maxDistance
+      ? currentDistance.toFixed(0)
+      : "> " + maxDistance;
+
+  if (locked) {
+    warning.textContent = "⚠ OBSTACLE DETECTED — RADAR LOCKED";
+    warning.style.color = "#ff3333";
+  } else if (currentDistance <= maxDistance) {
+    warning.textContent = "SCANNING — OBJECT IN RANGE";
+    warning.style.color = "#00ff88";
+  } else {
+    warning.textContent = "SCANNING — NO OBJECT IN RANGE";
+    warning.style.color = "#00ff88";
+  }
+}
+
+function drawRadar() {
+  const w = canvas.width;
+  const h = canvas.height;
+
+  const cx = w / 2;
+  const cy = h - 35;
+  const radius = Math.min(maxRadius, w / 2 - 25, h - 55);
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#00150c";
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.strokeStyle = "#006633";
+  ctx.lineWidth = 1.5;
+
+  // Semicircular range rings.
+  for (let i = 1; i <= 4; i++) {
+    const r = radius * i / 4;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, Math.PI, 2 * Math.PI);
+    ctx.stroke();
+
+    ctx.fillStyle = "#00bb66";
+    ctx.font = "13px Arial";
+    ctx.fillText((maxDistance * i / 4) + " cm", cx + 8, cy - r + 16);
+  }
+
+  // Angle guide lines.
+  for (let a = 0; a <= 180; a += 30) {
+    const rad = (a - 90) * Math.PI / 180;
+    const x = cx + Math.sin(rad) * radius;
+    const y = cy - Math.cos(rad) * radius;
+
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+
+    const labelX = cx + Math.sin(rad) * (radius + 17);
+    const labelY = cy - Math.cos(rad) * (radius + 17);
+
+    ctx.fillStyle = "#00ff88";
+    ctx.textAlign = "center";
+    ctx.fillText(a + "°", labelX, labelY);
+  }
+
+  // Recent object trail.
+  for (const p of trail) {
+    if (p.distance > maxDistance) continue;
+
+    const rad = (p.angle - 90) * Math.PI / 180;
+    const r = p.distance / maxDistance * radius;
+    const x = cx + Math.sin(rad) * r;
+    const y = cy - Math.cos(rad) * r;
+
+    ctx.fillStyle = locked ? "#ff3333" : "#00bb66";
+    ctx.beginPath();
+    ctx.arc(x, y, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Current sweep line.
+  const rad = (currentAngle - 90) * Math.PI / 180;
+  const sx = cx + Math.sin(rad) * radius;
+  const sy = cy - Math.cos(rad) * radius;
+
+  ctx.strokeStyle = locked ? "#ff3333" : "#00ff88";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(sx, sy);
+  ctx.stroke();
+
+  // Locked obstacle marker.
+  if (locked && currentDistance <= maxDistance) {
+    const r = currentDistance / maxDistance * radius;
+    const x = cx + Math.sin(rad) * r;
+    const y = cy - Math.cos(rad) * r;
+
+    ctx.fillStyle = "#ff2222";
+    ctx.beginPath();
+    ctx.arc(x, y, 10, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = "#ff2222";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x, y, 17, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  ctx.textAlign = "left";
+  requestAnimationFrame(drawRadar);
+}
+
+async function disconnectArduino() {
+  keepReading = false;
+
+  if (reader) {
+    try {
+      await reader.cancel();
+    } catch (e) {}
+  }
+
+  if (port) {
+    try {
+      await port.close();
+    } catch (e) {}
+
+    port = null;
+  }
+
+  statusText.textContent = "Disconnected";
+}
+
+drawRadar();
+</script>
+
+</body>
+</html>
